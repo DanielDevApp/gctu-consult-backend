@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
-const { normalizeLabel } = require('../utils/text');
+const { PROGRAMMES, DEPARTMENTS } = require('../utils/academic');
 
 const router = express.Router();
 
@@ -44,15 +44,19 @@ router.put('/', requireAuth, async (req, res) => {
 
   try {
     if (role === 'student') {
-      const { firstName, lastName, level } = req.body;
-      const programme = normalizeLabel(req.body.programme);
+      const { firstName, lastName, level, programme } = req.body;
+      if (!PROGRAMMES.includes(programme)) {
+        return res.status(400).json({ message: 'Please select a valid programme.' });
+      }
       await pool.query(
         `UPDATE students SET first_name = ?, last_name = ?, level = ?, programme = ? WHERE id = ?`,
         [firstName, lastName, level, programme, id]
       );
     } else if (role === 'lecturer') {
-      const { firstName, lastName, title, office, bio } = req.body;
-      const department = normalizeLabel(req.body.department);
+      const { firstName, lastName, department, title, office, bio } = req.body;
+      if (!DEPARTMENTS.includes(department)) {
+        return res.status(400).json({ message: 'Please select a valid department.' });
+      }
       await pool.query(
         `UPDATE lecturers SET first_name = ?, last_name = ?, department = ?, title = ?, office = ?, bio = ? WHERE id = ?`,
         [firstName, lastName, department, title || null, office || null, bio || null, id]

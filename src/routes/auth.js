@@ -9,7 +9,7 @@ const { requireAuth } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const { buildResetEmail } = require('../utils/passwordResetEmail');
 const { buildVerificationEmail } = require('../utils/verificationEmail');
-const { normalizeLabel } = require('../utils/text');
+const { PROGRAMMES, DEPARTMENTS } = require('../utils/academic');
 
 const router = express.Router();
 
@@ -110,14 +110,13 @@ router.post(
     body('lastName').trim().notEmpty().withMessage('Last name is required'),
     body('studentId').trim().notEmpty().withMessage('Student ID is required'),
     body('level').trim().notEmpty().withMessage('Level is required'),
-    body('programme').trim().notEmpty().withMessage('Programme is required'),
+    body('programme').isIn(PROGRAMMES).withMessage('Please select a valid programme'),
     body('email').isEmail().withMessage('A valid GCTU email is required').normalizeEmail(),
     body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   ],
   async (req, res) => {
     if (handleValidation(req, res)) return;
-    const { firstName, lastName, studentId, level, email, password } = req.body;
-    const programme = normalizeLabel(req.body.programme);
+    const { firstName, lastName, studentId, level, programme, email, password } = req.body;
 
     try {
       const [existing] = await pool.query(
@@ -163,14 +162,13 @@ router.post(
     body('firstName').trim().notEmpty().withMessage('First name is required'),
     body('lastName').trim().notEmpty().withMessage('Last name is required'),
     body('staffId').trim().notEmpty().withMessage('Staff ID is required'),
-    body('department').trim().notEmpty().withMessage('Department is required'),
+    body('department').isIn(DEPARTMENTS).withMessage('Please select a valid department'),
     body('email').isEmail().withMessage('A valid GCTU email is required').normalizeEmail(),
     body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   ],
   async (req, res) => {
     if (handleValidation(req, res)) return;
-    const { firstName, lastName, staffId, title, email, password } = req.body;
-    const department = normalizeLabel(req.body.department);
+    const { firstName, lastName, staffId, department, title, email, password } = req.body;
 
     try {
       const [existing] = await pool.query(
