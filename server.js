@@ -1,4 +1,11 @@
 require('dotenv').config();
+// Some hosts (Render's free tier among them) advertise outbound IPv6 but
+// silently blackhole it, so any Node dns.lookup() that returns an AAAA
+// record first (the default since Node 18) hangs for minutes before ever
+// trying IPv4 — hit this on smtp.gmail.com specifically (port 465, from a
+// registration request). Forcing IPv4 first sidesteps it everywhere in the
+// process, not just SMTP.
+require('dns').setDefaultResultOrder('ipv4first');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
