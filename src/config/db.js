@@ -55,6 +55,15 @@ function toPg(sql, params = []) {
     let val = params[i++];
     if (val === undefined) val = null;
     if (Array.isArray(val)) {
+      // An empty array would otherwise expand to nothing at all, turning
+      // `IN (?)` into `IN ()` — a syntax error rather than an empty result.
+      // NULL is the honest translation: `IN (NULL)` matches no rows, which is
+      // exactly what "none of these" means. Today's two call sites guard the
+      // length themselves; this makes the third one safe by default.
+      if (val.length === 0) {
+        values.push(null);
+        return `$${values.length}`;
+      }
       return val.map((v) => { values.push(v === undefined ? null : v); return `$${values.length}`; }).join(', ');
     }
     values.push(val);

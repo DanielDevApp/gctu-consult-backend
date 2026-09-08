@@ -30,7 +30,15 @@ function assertLocalDatabase() {
 }
 assertLocalDatabase();
 
+const { PROGRAMMES, DEPARTMENTS } = require('../src/utils/academic');
 const app = require('../src/app');
+
+// Seed with values from the app's own whitelists. Inserting made-up ones
+// straight into the database works, but then any route that validates against
+// those lists (profile editing, registration) rejects the fixture and the test
+// fails for a reason that has nothing to do with what it's checking.
+const PROGRAMME = PROGRAMMES[1];
+const DEPARTMENT = DEPARTMENTS[0];
 const { pool, ensureSchema } = require('../src/config/db');
 
 let server;
@@ -87,8 +95,8 @@ async function makeStudent({ active = 1, verified = 1 } = {}) {
   const email = `test.student.${u}@example.test`;
   const [r] = await pool.query(
     `INSERT INTO students (first_name, last_name, student_id, level, programme, email, password_hash, email_verified, is_active)
-     VALUES ('Test','Student',?,'300','BSc Computer Science',?,?,?,?)`,
-    [`S${u}`.slice(0, 20), email, await hash(), verified, active]
+     VALUES ('Test','Student',?,'300',?,?,?,?,?)`,
+    [`S${u}`.slice(0, 20), PROGRAMME, email, await hash(), verified, active]
   );
   created.students.push(r.insertId);
   return { id: r.insertId, email, role: 'student' };
@@ -99,8 +107,8 @@ async function makeLecturer({ active = 1, verified = 1 } = {}) {
   const email = `test.lecturer.${u}@example.test`;
   const [r] = await pool.query(
     `INSERT INTO lecturers (first_name, last_name, staff_id, department, email, password_hash, email_verified, is_verified, is_active)
-     VALUES ('Test','Lecturer',?,'Computer Science',?,?,?,1,?)`,
-    [`L${u}`.slice(0, 20), email, await hash(), verified, active]
+     VALUES ('Test','Lecturer',?,?,?,?,?,1,?)`,
+    [`L${u}`.slice(0, 20), DEPARTMENT, email, await hash(), verified, active]
   );
   created.lecturers.push(r.insertId);
   return { id: r.insertId, email, role: 'lecturer' };
@@ -199,5 +207,5 @@ module.exports = {
   start, stop, call, login, signedIn,
   makeStudent, makeLecturer, makeAdmin,
   makeWindow, moveSlot, bookingStatus,
-  pool, PASSWORD,
+  pool, PASSWORD, PROGRAMME, DEPARTMENT,
 };
