@@ -106,15 +106,32 @@ const pool = {
   },
 };
 
-async function testConnection() {
-  try {
-    const conn = await pool.getConnection();
-    console.log('✅ PostgreSQL connected:', process.env.DB_NAME || 'gctu_consult');
-    conn.release();
-  } catch (err) {
-    console.error('❌ PostgreSQL connection failed:', err.message);
-    console.error('   Check that the PostgreSQL service is running and .env DB_* values are correct.');
+/**
+ * Connects on boot, retrying with backoff rather than giving up after one
+ * attempt. A managed database (Neon) and the app can easily come back at
+ * different moments after a restart or a brief network blip — a single failed
+ * attempt used to leave the API running but 500ing every request until
+ * somebody noticed and restarted it by hand.
+ */
+async function testConnection({ attempts = 5, delayMs = 2000 } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const conn = await pool.getConnection();
+      console.log('✅ PostgreSQL connected:', process.env.DB_NAME || 'gctu_consult');
+      conn.release();
+      return true;
+    } catch (err) {
+      const last = attempt === attempts;
+      console.error(`❌ PostgreSQL connection failed (attempt ${attempt}/${attempts}):`, err.message);
+      if (last) {
+        console.error('   Check that the database is reachable and DATABASE_URL / DB_* values are correct.');
+        return false;
+      }
+      // Back off a little further each time, capped so boot can't stall for long.
+      await new Promise((r) => setTimeout(r, Math.min(delayMs * attempt, 10000)));
+    }
   }
+  return false;
 }
 
 /**
@@ -126,7 +143,7 @@ async function testConnection() {
  * Postgres has no "ALTER ... ENUM IF NOT CONTAINS" equivalent to check
  * against first.
  */
-async function ensureSchema() {
+async function applySchema() {
   try {
     await pool.query(`
       CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $f$
@@ -377,9 +394,58 @@ async function ensureSchema() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_log(created_at)`);
 
     console.log('✅ Schema ready (PostgreSQL)');
+    schemaState = { ready: true, error: null, checkedAt: new Date().toISOString() };
+    return true;
   } catch (err) {
-    console.error('⚠️  Schema setup failed:', err.message);
+    // Loud, and readable from outside the process. This function used to
+    // swallow the error entirely, which meant a half-applied migration left
+    // the API running and reporting healthy while every query touching a
+    // missing column failed — invisible until someone hit the right page.
+    // /api/health now reports this, so a broken deploy is one request away
+    // from being diagnosed instead of a column-by-column hunt.
+    console.error('');
+    console.error('❌❌ SCHEMA SETUP FAILED — the API is running but may be broken.');
+    console.error('     ', err.message);
+    console.error('      Fix the database, then redeploy or restart. See /api/health.');
+    console.error('');
+    schemaState = { ready: false, error: err.message, checkedAt: new Date().toISOString() };
+    return false;
   }
 }
 
-module.exports = { pool, testConnection, ensureSchema };
+/**
+ * A fixed key for the Postgres advisory lock guarding schema setup. Any value
+ * works as long as every instance agrees on it.
+ */
+const SCHEMA_LOCK_KEY = 947213;
+
+/**
+ * Applies the schema under an advisory lock, so only one process migrates at
+ * a time.
+ *
+ * The DDL is written to be idempotent, but "DROP TRIGGER IF EXISTS" followed
+ * by "CREATE TRIGGER" is not *atomic*: two processes starting together can
+ * both drop, then both create, and the loser fails with "trigger already
+ * exists" — leaving that instance running against a half-applied schema. That
+ * happens whenever instances overlap, which is exactly what a rolling deploy
+ * does. Anyone who can't get the lock waits, then finds the work already done.
+ */
+async function ensureSchema() {
+  const lock = await pool.getConnection();
+  try {
+    await lock.query('SELECT pg_advisory_lock(?)', [SCHEMA_LOCK_KEY]);
+    try {
+      return await applySchema();
+    } finally {
+      await lock.query('SELECT pg_advisory_unlock(?)', [SCHEMA_LOCK_KEY]);
+    }
+  } finally {
+    lock.release();
+  }
+}
+
+/** Whether the last ensureSchema() run succeeded, for /api/health to report. */
+let schemaState = { ready: false, error: null, checkedAt: null };
+const getSchemaState = () => schemaState;
+
+module.exports = { pool, testConnection, ensureSchema, getSchemaState };

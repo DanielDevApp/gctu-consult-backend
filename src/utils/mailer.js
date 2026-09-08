@@ -66,6 +66,15 @@ async function sendViaSendGrid({ to, subject, html, text }) {
  * should check this return value rather than assuming success.
  */
 async function sendMail({ to, subject, html, text }) {
+  // Never send during a test run. The suite creates dozens of bookings and
+  // notifications, each of which fires an email — that means real SMTP
+  // traffic, a slow suite, and one typo away from mailing a live address.
+  // Recorded in sentMail so tests can still assert an email *would* have gone.
+  if (process.env.NODE_ENV === 'test') {
+    sentMail.push({ to, subject });
+    return true;
+  }
+
   if (process.env.SENDGRID_API_KEY) {
     try {
       await sendViaSendGrid({ to, subject, html, text });
@@ -97,4 +106,7 @@ async function sendMail({ to, subject, html, text }) {
   }
 }
 
-module.exports = { sendMail };
+/** Messages captured instead of sent while NODE_ENV === 'test'. */
+const sentMail = [];
+
+module.exports = { sendMail, sentMail };

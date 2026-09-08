@@ -11,6 +11,7 @@ const { buildResetEmail } = require('../utils/passwordResetEmail');
 const { buildVerificationEmail } = require('../utils/verificationEmail');
 const { PROGRAMMES, DEPARTMENTS } = require('../utils/academic');
 const { primaryClientUrl } = require('../config/clientUrls');
+const { loginKey, bodyScopedKey } = require('../middleware/rateLimitKeys');
 
 const router = express.Router();
 
@@ -23,6 +24,7 @@ const MAX_VERIFY_ATTEMPTS = 5;
 const forgotPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
+  keyGenerator: bodyScopedKey('email'),
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many reset requests. Please try again later.' },
@@ -33,6 +35,7 @@ const forgotPasswordLimiter = rateLimit({
 const resendVerificationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
+  keyGenerator: bodyScopedKey('identifier'),
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many verification requests. Please try again later.' },
@@ -44,22 +47,30 @@ const resendVerificationLimiter = rateLimit({
 const verifyEmailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
+  keyGenerator: bodyScopedKey('identifier'),
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many attempts. Please request a new code and try again later.' },
 });
 
-// /login has no rate limiting anywhere else in front of it (unlike every
-// other auth-abuse-prone route above), which makes it the one place an
-// attacker could brute-force a password unthrottled. Same shape as the
-// others but a little looser — a real user mistyping a password a few
-// times in a row shouldn't get locked out.
+// Throttles password guessing without punishing legitimate users:
+//
+//  - keyed per IP *and* per submitted identifier, so slowing down an attack on
+//    one account doesn't lock out everyone else on the same campus network;
+//  - only failed attempts count, so a lecture theatre full of students signing
+//    in successfully at 9am never trips it.
+//
+// Previously this was 10 requests per minute counting successes, keyed on an
+// IP that (behind Render's proxy) was identical for every user on the
+// platform — the 11th login of any kind in a minute locked out everybody.
 const loginLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,
+  windowMs: 15 * 60 * 1000,
   limit: 10,
+  keyGenerator: loginKey,
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many login attempts. Please wait a few minutes and try again.' },
+  message: { message: 'Too many failed login attempts for this account. Please wait a few minutes and try again.' },
 });
 
 const AVATAR_COLORS = ['#0F3D5F', '#1D6F5C', '#B8860B', '#7A2E4A', '#2E5C8A', '#8A4B2E'];
