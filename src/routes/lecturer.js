@@ -3,9 +3,10 @@ const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { notify } = require('../utils/notify');
-const { purgeIfFullyHidden } = require('../utils/bookingVisibility');
-const { expirePastSlots, releaseSlotStatus } = require('../utils/expireSlots');
+const { purgeIfFullyHidden, canRemoveFromHistory, removalBlockedMessage } = require('../utils/bookingVisibility');
+const { expirePastSlots, releaseSlotStatus, hasSlotPassed } = require('../utils/expireSlots');
 const { notifyWaitlist } = require('../utils/waitlist');
+const { formatSlotTime } = require('../utils/time');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('lecturer'));
@@ -152,15 +153,26 @@ router.post(
         });
       }
 
+      // One window id per occurrence date: every slot carved out of a single
+      // day's start–end range belongs to the same consultation window, and a
+      // student may only book one slot per window. A weekly repeat is a
+      // separate window each week, so students can book again next week.
+      const [windowIdRows] = await pool.query(
+        `SELECT nextval('availability_window_seq') AS wid FROM generate_series(1, ?)`,
+        [occurrenceDates.length]
+      );
+
       const rows = [];
       const values = [];
-      for (const date of occurrenceDates) {
+      occurrenceDates.forEach((date, dayIndex) => {
+        const windowId = windowIdRows[dayIndex].wid;
         for (let i = 0; i < slotsPerDay; i++) {
           const slotStart = addMinutes(startTime, i * slotDurationMinutes);
           const slotEnd = addMinutes(startTime, (i + 1) * slotDurationMinutes);
-          rows.push('(?, ?, ?, ?, ?, ?, ?, ?, ?)');
+          rows.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
           values.push(
             req.user.id,
+            windowId,
             date,
             slotStart,
             slotEnd,
@@ -171,11 +183,11 @@ router.post(
             notes || null
           );
         }
-      }
+      });
 
       await pool.query(
         `INSERT INTO availability_slots
-          (lecturer_id, slot_date, start_time, end_time, duration_minutes, mode, venue, meeting_link, notes)
+          (lecturer_id, window_id, slot_date, start_time, end_time, duration_minutes, mode, venue, meeting_link, notes)
          VALUES ${rows.join(', ')}`,
         values
       );
@@ -272,6 +284,9 @@ router.delete('/bookings/:id', async (req, res) => {
       ]))[0],
     ];
     if (!booking) return res.status(404).json({ message: 'Booking not found.' });
+    if (!canRemoveFromHistory(booking.status)) {
+      return res.status(409).json({ message: removalBlockedMessage(booking.status, 'lecturer') });
+    }
 
     await pool.query('UPDATE bookings SET hidden_by_lecturer = 1 WHERE id = ?', [req.params.id]);
     await purgeIfFullyHidden(req.params.id);
@@ -298,6 +313,10 @@ router.put('/bookings/:id', async (req, res) => {
     ];
     if (!booking) return res.status(404).json({ message: 'Booking not found.' });
 
+    const [[slot]] = [
+      (await pool.query('SELECT * FROM availability_slots WHERE id = ?', [booking.slot_id]))[0],
+    ];
+
     if (['confirmed', 'declined'].includes(status) && booking.status !== 'pending') {
       return res.status(409).json({
         message: booking.status === 'expired'
@@ -305,16 +324,24 @@ router.put('/bookings/:id', async (req, res) => {
           : `This booking is already ${booking.status} and can no longer be responded to.`,
       });
     }
-    if (['completed', 'no_show'].includes(status) && booking.status !== 'confirmed') {
-      return res.status(409).json({ message: `Only a confirmed booking can be marked ${status === 'completed' ? 'complete' : 'no-show'} (this one is ${booking.status}).` });
+    if (['completed', 'no_show'].includes(status)) {
+      if (booking.status !== 'confirmed') {
+        return res.status(409).json({ message: `Only a confirmed booking can be marked ${status === 'completed' ? 'complete' : 'no-show'} (this one is ${booking.status}).` });
+      }
+      // Attendance is a record of what actually happened, so it can only be
+      // set once the consultation is over — marking a student complete (or a
+      // no-show) at 1:05 PM for a 1:05–1:10 PM slot would be recording an
+      // outcome for time that hasn't been spent yet.
+      if (slot && !hasSlotPassed(slot)) {
+        return res.status(409).json({
+          message: `This consultation runs until ${formatSlotTime(slot.end_time)} on ${slot.slot_date}. You can record attendance once it has ended.`,
+        });
+      }
     }
 
     await pool.query('UPDATE bookings SET status = ? WHERE id = ?', [status, req.params.id]);
 
     if (status === 'declined') {
-      const [[slot]] = [
-        (await pool.query('SELECT * FROM availability_slots WHERE id = ?', [booking.slot_id]))[0],
-      ];
       if (slot) {
         const newStatus = releaseSlotStatus(slot);
         await pool.query(`UPDATE availability_slots SET status = ? WHERE id = ?`, [newStatus, booking.slot_id]);
@@ -368,14 +395,23 @@ router.put(
         return res.status(409).json({ message: `Only a confirmed booking can be cancelled this way (this one is ${booking.status}).` });
       }
 
+      const [[slot]] = [
+        (await pool.query('SELECT * FROM availability_slots WHERE id = ?', [booking.slot_id]))[0],
+      ];
+      // Once the consultation's time is behind us there's nothing left to
+      // call off — what's outstanding is the record of whether the student
+      // turned up. Cancelling here would erase that instead of recording it.
+      if (slot && hasSlotPassed(slot)) {
+        return res.status(409).json({
+          message: 'This consultation\'s time has already passed, so it can no longer be cancelled. Mark it complete, or as a no-show if the student didn\'t attend.',
+        });
+      }
+
       await pool.query(
         `UPDATE bookings SET status = 'cancelled', cancelled_by = 'lecturer', cancel_reason = ? WHERE id = ?`,
         [reason || null, req.params.id]
       );
 
-      const [[slot]] = [
-        (await pool.query('SELECT * FROM availability_slots WHERE id = ?', [booking.slot_id]))[0],
-      ];
       if (slot) {
         const newStatus = releaseSlotStatus(slot);
         await pool.query(`UPDATE availability_slots SET status = ? WHERE id = ?`, [newStatus, booking.slot_id]);

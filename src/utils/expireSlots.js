@@ -8,6 +8,75 @@ function hasSlotPassed(slot) {
   return new Date(`${slot.slot_date}T${slot.end_time}`) <= new Date();
 }
 
+/** True once a slot's start time is behind the server clock — i.e. the
+ *  consultation is either under way or already over. Cancelling stops being
+ *  available to the student at this point: the lecturer is expected to be
+ *  sitting there, and letting a student bail out mid-session would be a free
+ *  way to dodge being marked a no-show. */
+function hasSlotStarted(slot) {
+  return new Date(`${slot.slot_date}T${slot.start_time}`) <= new Date();
+}
+
+/** How long after a consultation ends the lecturer still has to record
+ *  attendance before the booking is closed out automatically. */
+const ATTENDANCE_GRACE_HOURS = Number(process.env.ATTENDANCE_GRACE_HOURS) || 48;
+
+/**
+ * A confirmed booking whose time has passed sits in 'confirmed' on purpose —
+ * that's what makes the lecturer's "mark complete / no-show" buttons live, and
+ * marking attendance is the only way it reaches a finished state. But a
+ * lecturer who never gets round to it would otherwise strand the booking
+ * there forever: neither side can delete a live booking, so it would sit in
+ * both their histories permanently.
+ *
+ * This closes those out once the grace period is up — 'expired' with
+ * attendance_missed set, so the UI can say "attendance was never recorded"
+ * rather than the "the lecturer never answered the request" that plain
+ * 'expired' means elsewhere.
+ */
+async function closeUnmarkedBookings() {
+  try {
+    const [rows] = await pool.query(
+      `SELECT b.id, b.slot_id, b.student_id, b.lecturer_id, s.slot_date, s.start_time
+       FROM bookings b
+       JOIN availability_slots s ON s.id = b.slot_id
+       WHERE b.status = 'confirmed'
+         AND (s.slot_date + s.end_time) <= LOCALTIMESTAMP - (?::double precision * INTERVAL '1 hour')`,
+      [ATTENDANCE_GRACE_HOURS]
+    );
+
+    for (const row of rows) {
+      // Guarded on status the same way expirePendingBookings is, so the 60s
+      // sweep and an inline route-level call can't both process one booking.
+      const [result] = await pool.query(
+        `UPDATE bookings SET status = 'expired', attendance_missed = 1 WHERE id = ? AND status = 'confirmed'`,
+        [row.id]
+      );
+      if (result.affectedRows === 0) continue;
+
+      await pool.query(`UPDATE availability_slots SET status = 'completed' WHERE id = ?`, [row.slot_id]);
+
+      const when = `${row.slot_date} at ${row.start_time}`;
+      await notify(
+        row.student_id,
+        'student',
+        'Consultation closed',
+        `Your consultation on ${when} was closed automatically — your lecturer didn't record whether you attended. Book another slot if you still need one.`,
+        'booking_expired'
+      );
+      await notify(
+        row.lecturer_id,
+        'lecturer',
+        'Attendance never recorded',
+        `The consultation on ${when} was closed automatically because it wasn't marked complete or as a no-show within ${ATTENDANCE_GRACE_HOURS} hours of ending.`,
+        'booking_expired'
+      );
+    }
+  } catch (err) {
+    console.error('Failed to close out unmarked bookings:', err.message);
+  }
+}
+
 /** What an availability slot should become once its booking is released
  *  (cancelled, declined, or moved elsewhere via reschedule). A slot whose
  *  time window is still ahead of us goes back to 'open' so someone else can
@@ -85,6 +154,9 @@ async function expirePastSlots() {
   // slot to 'expired', so by the time the plain 'open' sweep below runs
   // there's nothing left for it to double-handle.
   await expirePendingBookings();
+  // Confirmed bookings the lecturer never marked attendance on, once their
+  // grace period is up. Also handles its own slot, same as above.
+  await closeUnmarkedBookings();
 
   try {
     await pool.query(
@@ -98,4 +170,10 @@ async function expirePastSlots() {
   }
 }
 
-module.exports = { expirePastSlots, hasSlotPassed, releaseSlotStatus };
+module.exports = {
+  expirePastSlots,
+  hasSlotPassed,
+  hasSlotStarted,
+  releaseSlotStatus,
+  ATTENDANCE_GRACE_HOURS,
+};

@@ -224,6 +224,28 @@ async function ensureSchema() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Every slot belongs to the availability *window* the lecturer published
+    // it in — one "9:00–11:00 on Monday, split into 30-min slots" block is
+    // one window, and a weekly repeat makes a separate window per occurrence
+    // date. Students are limited to one booking per window (see
+    // utils/bookingWindow.js), so the grouping has to be a stored identity
+    // rather than something re-derived from times after the fact.
+    await pool.query(`CREATE SEQUENCE IF NOT EXISTS availability_window_seq`);
+    await pool.query(`ALTER TABLE availability_slots ADD COLUMN IF NOT EXISTS window_id INT`);
+    // Backfill: slots published before this column existed get one window per
+    // (lecturer, date), which is what a window was in practice back then.
+    await pool.query(`
+      UPDATE availability_slots s
+      SET window_id = w.wid
+      FROM (
+        SELECT lecturer_id, slot_date, nextval('availability_window_seq') AS wid
+        FROM availability_slots
+        WHERE window_id IS NULL
+        GROUP BY lecturer_id, slot_date
+      ) w
+      WHERE s.window_id IS NULL AND s.lecturer_id = w.lecturer_id AND s.slot_date = w.slot_date
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_slot_window ON availability_slots(window_id)`);
     await pool.query(`ALTER TABLE availability_slots DROP CONSTRAINT IF EXISTS availability_slots_mode_check`);
     await pool.query(`ALTER TABLE availability_slots ADD CONSTRAINT availability_slots_mode_check CHECK (mode IN ('online', 'in_person'))`);
     await pool.query(`ALTER TABLE availability_slots DROP CONSTRAINT IF EXISTS availability_slots_status_check`);
@@ -251,6 +273,11 @@ async function ensureSchema() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Set when the attendance-grace sweep closes out a confirmed booking the
+    // lecturer never marked complete/no-show — lets the UI say "attendance
+    // was never recorded" instead of the generic "the request timed out"
+    // that plain 'expired' means for a never-answered request.
+    await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS attendance_missed SMALLINT NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check`);
     await pool.query(`ALTER TABLE bookings ADD CONSTRAINT bookings_status_check CHECK (status IN ('pending', 'confirmed', 'cancelled', 'completed', 'declined', 'expired', 'no_show'))`);
     await pool.query(`ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_cancelled_by_check`);

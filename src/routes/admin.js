@@ -4,7 +4,7 @@ const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { notify } = require('../utils/notify');
-const { purgeIfFullyHidden } = require('../utils/bookingVisibility');
+const { purgeIfFullyHidden, canRemoveFromHistory } = require('../utils/bookingVisibility');
 const { logAdminAction } = require('../utils/auditLog');
 const { toCsv, sendCsv } = require('../utils/csv');
 
@@ -460,12 +460,20 @@ router.get('/bookings/export', async (req, res) => {
   }
 });
 
-/* Remove a booking from the admin's own view (any status). Admin isn't a
-   party to the booking, so no ownership check — just visibility. */
+/* Remove a finished booking from the admin's own view. Admin isn't a party to
+   the booking, so no ownership check — just visibility. Live bookings stay
+   put for the same reason they do for the student and lecturer: an in-flight
+   consultation shouldn't be able to drop out of anyone's view, least of all
+   the one that exists for oversight. */
 router.delete('/bookings/:id', async (req, res) => {
   try {
-    const [[booking]] = [(await pool.query('SELECT id FROM bookings WHERE id = ?', [req.params.id]))[0]];
+    const [[booking]] = [(await pool.query('SELECT id, status FROM bookings WHERE id = ?', [req.params.id]))[0]];
     if (!booking) return res.status(404).json({ message: 'Booking not found.' });
+    if (!canRemoveFromHistory(booking.status)) {
+      return res.status(409).json({
+        message: `This booking is still ${booking.status} — only finished bookings (completed, no-show, cancelled, declined or expired) can be cleared from the list.`,
+      });
+    }
 
     await pool.query('UPDATE bookings SET hidden_by_admin = 1 WHERE id = ?', [req.params.id]);
     await purgeIfFullyHidden(req.params.id);

@@ -3,9 +3,12 @@ const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { notify } = require('../utils/notify');
-const { purgeIfFullyHidden } = require('../utils/bookingVisibility');
-const { expirePastSlots, hasSlotPassed, releaseSlotStatus } = require('../utils/expireSlots');
+const { purgeIfFullyHidden, canRemoveFromHistory, removalBlockedMessage } = require('../utils/bookingVisibility');
+const { expirePastSlots, hasSlotPassed, hasSlotStarted, releaseSlotStatus } = require('../utils/expireSlots');
 const { notifyWaitlist } = require('../utils/waitlist');
+const {
+  lockStudentWindow, findWindowConflict, windowConflictMessage, markBlockedWindows,
+} = require('../utils/bookingWindow');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('student'));
@@ -114,7 +117,13 @@ router.get('/departments', async (req, res) => {
    slots so students can see the full picture (e.g. "1 of 3 booked") instead
    of booked slots just disappearing. Booked slots are returned without any
    identifying info about who booked them; the student can only act on the
-   ones still marked 'open'. */
+   ones still marked 'open'.
+
+   Each slot also carries `already_booked_in_window`: true when this student
+   has already used their one booking for that availability window, so the
+   dialog can grey those slots out up front instead of letting the student
+   pick one and only then get rejected. `excludeBooking` is the booking being
+   rescheduled, which shouldn't count itself as the blocker. */
 router.get('/lecturers/:id/availability', async (req, res) => {
   try {
     await expirePastSlots();
@@ -124,6 +133,8 @@ router.get('/lecturers/:id/availability', async (req, res) => {
        ORDER BY slot_date ASC, start_time ASC`,
       [req.params.id]
     );
+    const excludeBooking = req.query.excludeBooking ? Number(req.query.excludeBooking) : null;
+    await markBlockedWindows(pool, rows, req.user.id, Number.isInteger(excludeBooking) ? excludeBooking : null);
     res.json(rows);
   } catch (err) {
     console.error(err);
@@ -216,6 +227,18 @@ router.post(
         return res.status(409).json({ message: 'This slot\'s time has already passed. Please choose another.' });
       }
 
+      // One booking per availability window: a student can't take several
+      // slots out of the same block a lecturer opened up. The advisory lock
+      // is what stops two simultaneous requests (different slots, same
+      // window) from both passing this check — they lock different slot rows,
+      // so the FOR UPDATE above doesn't serialize them on its own.
+      await lockStudentWindow(conn, studentId, slot);
+      const conflict = await findWindowConflict(conn, { studentId, slot });
+      if (conflict) {
+        await conn.rollback();
+        return res.status(409).json({ message: windowConflictMessage(conflict) });
+      }
+
       const [result] = await conn.query(
         `INSERT INTO bookings (slot_id, student_id, lecturer_id, reason) VALUES (?, ?, ?, ?)`,
         [slotId, studentId, slot.lecturer_id, reason || null]
@@ -301,7 +324,10 @@ router.get('/bookings', async (req, res) => {
   }
 });
 
-/* Remove a booking from the student's own history (any status) */
+/* Remove a finished booking from the student's own history. A live booking
+   (pending or confirmed) can't be removed — cancelling is the way out of one,
+   so the lecturer sees it happen instead of the booking silently vanishing
+   from one side's view while they still expect the student to turn up. */
 router.delete('/bookings/:id', async (req, res) => {
   try {
     const [[booking]] = [
@@ -311,6 +337,9 @@ router.delete('/bookings/:id', async (req, res) => {
       ]))[0],
     ];
     if (!booking) return res.status(404).json({ message: 'Booking not found.' });
+    if (!canRemoveFromHistory(booking.status)) {
+      return res.status(409).json({ message: removalBlockedMessage(booking.status, 'student') });
+    }
 
     await pool.query('UPDATE bookings SET hidden_by_student = 1 WHERE id = ?', [req.params.id]);
     await purgeIfFullyHidden(req.params.id);
@@ -339,6 +368,15 @@ router.put('/bookings/:id/cancel', async (req, res) => {
     const [[slot]] = [
       (await pool.query('SELECT * FROM availability_slots WHERE id = ?', [booking.slot_id]))[0],
     ];
+    // Cancelling closes once the consultation starts. The lecturer is already
+    // sitting there by then, and a student who could still cancel mid-session
+    // would have a free way to wipe out a no-show they're about to be marked
+    // with. From the start time on, the outcome is the lecturer's to record.
+    if (slot && hasSlotStarted(slot)) {
+      return res.status(409).json({
+        message: 'This consultation has already started, so it can no longer be cancelled. Speak to your lecturer — they record whether you attended once it ends.',
+      });
+    }
 
     await pool.query(`UPDATE bookings SET status = 'cancelled', cancelled_by = 'student' WHERE id = ?`, [
       req.params.id,
@@ -401,6 +439,17 @@ router.put(
       const [[oldSlot]] = [
         (await conn.query('SELECT * FROM availability_slots WHERE id = ? FOR UPDATE', [booking.slot_id]))[0],
       ];
+      // Same reasoning as cancelling: once a confirmed consultation has
+      // started, moving it elsewhere would be a way to walk out of the
+      // no-show the lecturer is about to record. (A still-pending request is
+      // fine to move — the lecturer never committed to that time, and an
+      // expired one is exactly what rescheduling exists to rescue.)
+      if (booking.status === 'confirmed' && oldSlot && hasSlotStarted(oldSlot)) {
+        await conn.rollback();
+        return res.status(409).json({
+          message: 'This consultation has already started, so it can no longer be rescheduled. Speak to your lecturer — they record whether you attended once it ends.',
+        });
+      }
 
       const [[newSlot]] = [
         (await conn.query('SELECT * FROM availability_slots WHERE id = ? FOR UPDATE', [newSlotId]))[0],
@@ -427,6 +476,21 @@ router.put(
         return res.status(409).json({ message: 'That slot\'s time has already passed. Please choose another.' });
       }
 
+      // Rescheduling can't be used to get around the one-booking-per-window
+      // rule either. The booking being moved is excluded from the check, so
+      // shifting to a different slot inside its own window still works — that
+      // isn't a second booking, it's the same one at a new time.
+      await lockStudentWindow(conn, studentId, newSlot);
+      const conflict = await findWindowConflict(conn, {
+        studentId,
+        slot: newSlot,
+        excludeBookingId: booking.id,
+      });
+      if (conflict) {
+        await conn.rollback();
+        return res.status(409).json({ message: windowConflictMessage(conflict) });
+      }
+
       // Release the old slot — back to 'open' if there's still time left on
       // it, or left/set 'expired' if it's already in the past (e.g. this
       // booking was itself expired). Guard for a slot that's already been
@@ -442,7 +506,10 @@ router.put(
         // reminder_sent resets too — a reminder already sent for the old
         // time doesn't cover this new one, and the booking isn't even
         // 'confirmed' again yet for the reminder sweep to consider it.
-        `UPDATE bookings SET slot_id = ?, status = 'pending', cancelled_by = NULL, reminder_sent = 0 WHERE id = ?`,
+        // attendance_missed likewise belongs to the slot that was abandoned,
+        // not to this fresh request; leaving it set would mislabel this
+        // booking if it later expires unanswered.
+        `UPDATE bookings SET slot_id = ?, status = 'pending', cancelled_by = NULL, reminder_sent = 0, attendance_missed = 0 WHERE id = ?`,
         [newSlot.id, booking.id]
       );
 

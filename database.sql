@@ -103,9 +103,17 @@ CREATE TRIGGER trg_admins_updated_at BEFORE UPDATE ON admins
 -- ---------------------------------------------------------------------
 -- AVAILABILITY SLOTS (created by lecturers)
 -- ---------------------------------------------------------------------
+-- window_id groups every slot a lecturer published in one go for one date:
+-- "9:00–11:00 on Monday, 30 min each" is one window of 4 slots, and a weekly
+-- repeat creates a separate window per occurrence date. A student may hold
+-- only one booking per window (see src/utils/bookingWindow.js), so this
+-- grouping is stored rather than re-derived from times after the fact.
+CREATE SEQUENCE IF NOT EXISTS availability_window_seq;
+
 CREATE TABLE IF NOT EXISTS availability_slots (
   id SERIAL PRIMARY KEY,
   lecturer_id INT NOT NULL REFERENCES lecturers(id) ON DELETE CASCADE,
+  window_id INT DEFAULT NULL,
   slot_date DATE NOT NULL,
   start_time TIME NOT NULL,
   end_time TIME NOT NULL,
@@ -121,6 +129,7 @@ CREATE TABLE IF NOT EXISTS availability_slots (
 );
 CREATE INDEX IF NOT EXISTS idx_slot_lecturer ON availability_slots(lecturer_id);
 CREATE INDEX IF NOT EXISTS idx_slot_status ON availability_slots(status);
+CREATE INDEX IF NOT EXISTS idx_slot_window ON availability_slots(window_id);
 DROP TRIGGER IF EXISTS trg_slots_updated_at ON availability_slots;
 CREATE TRIGGER trg_slots_updated_at BEFORE UPDATE ON availability_slots
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -139,6 +148,11 @@ CREATE TABLE IF NOT EXISTS bookings (
   cancelled_by VARCHAR(20) DEFAULT NULL CHECK (cancelled_by IN ('student', 'lecturer', 'admin')),
   cancel_reason VARCHAR(500) DEFAULT NULL,
   reminder_sent SMALLINT NOT NULL DEFAULT 0,  -- flips to 1 once the "coming up" reminder has gone out
+  -- Set when the attendance-grace sweep closes out a confirmed booking the
+  -- lecturer never marked complete/no-show, so the UI can say "attendance was
+  -- never recorded" rather than the "request timed out" that plain 'expired'
+  -- means for a request the lecturer never answered in the first place.
+  attendance_missed SMALLINT NOT NULL DEFAULT 0,
   -- Per-viewer soft delete: each side can clear a booking from their own
   -- history without affecting what the other parties can see.
   hidden_by_student SMALLINT NOT NULL DEFAULT 0,
