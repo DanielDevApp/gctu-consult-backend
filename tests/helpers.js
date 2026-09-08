@@ -139,6 +139,25 @@ const asDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDa
 const asTime = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 
 /**
+ * A slot is stored as one `slot_date` plus a start and end time, so a window
+ * crossing midnight is unrepresentable: the end time would be numerically
+ * *earlier* than the start on the same date, and every "has this passed yet?"
+ * comparison would read it as long gone. The availability API refuses to
+ * create one (it requires end > start), so tests must not fabricate one
+ * either — this pulls a straddling slot back to sit inside the same day.
+ */
+function keepWithinOneDay(start, durationMinutes) {
+  let end = new Date(start.getTime() + durationMinutes * 60000);
+  if (asDate(end) !== asDate(start)) {
+    const dayEnd = new Date(`${asDate(start)}T23:59:00`);
+    const overflow = end.getTime() - dayEnd.getTime();
+    start = new Date(start.getTime() - overflow);
+    end = new Date(start.getTime() + durationMinutes * 60000);
+  }
+  return { start, end };
+}
+
+/**
  * Creates an availability window directly in the database, so a test can place
  * slots in the past — something the API deliberately refuses to do.
  * `offsets` are minutes relative to now for each slot's start.
@@ -147,8 +166,7 @@ async function makeWindow(lecturerId, offsets, { durationMinutes = 30, status = 
   const [[{ w }]] = [(await pool.query(`SELECT nextval('availability_window_seq') AS w`))[0]];
   const slots = [];
   for (const offset of offsets) {
-    const start = new Date(Date.now() + offset * 60000);
-    const end = new Date(start.getTime() + durationMinutes * 60000);
+    const { start, end } = keepWithinOneDay(new Date(Date.now() + offset * 60000), durationMinutes);
     const [r] = await pool.query(
       `INSERT INTO availability_slots
          (lecturer_id, window_id, slot_date, start_time, end_time, duration_minutes, mode, meeting_link, status)
@@ -162,8 +180,10 @@ async function makeWindow(lecturerId, offsets, { durationMinutes = 30, status = 
 
 /** Moves an existing slot to a new time relative to now, in minutes. */
 async function moveSlot(slotId, startOffsetMin, endOffsetMin) {
-  const start = new Date(Date.now() + startOffsetMin * 60000);
-  const end = new Date(Date.now() + endOffsetMin * 60000);
+  const { start, end } = keepWithinOneDay(
+    new Date(Date.now() + startOffsetMin * 60000),
+    endOffsetMin - startOffsetMin
+  );
   await pool.query(
     'UPDATE availability_slots SET slot_date = ?, start_time = ?, end_time = ? WHERE id = ?',
     [asDate(start), asTime(start), asTime(end), slotId]

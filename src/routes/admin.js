@@ -183,16 +183,25 @@ router.put('/lecturers/:id/verify', async (req, res) => {
 router.put('/lecturers/:id/toggle-active', async (req, res) => {
   try {
     const [[lecturer]] = [(await pool.query('SELECT first_name, last_name, is_active FROM lecturers WHERE id = ?', [req.params.id]))[0]];
-    await pool.query('UPDATE lecturers SET is_active = NOT is_active WHERE id = ?', [req.params.id]);
-    const willBeActive = lecturer ? !lecturer.is_active : null;
+    if (!lecturer) return res.status(404).json({ message: 'Lecturer not found.' });
+
+    // `1 - is_active`, not `NOT is_active`: these flags are SMALLINT 0/1, not
+    // booleans, and Postgres rejects NOT on a non-boolean ("argument of NOT
+    // must be type boolean"). MySQL accepted it on a TINYINT, so this came
+    // across in the Postgres migration and silently broke the button.
+    await pool.query('UPDATE lecturers SET is_active = 1 - is_active WHERE id = ?', [req.params.id]);
+    const willBeActive = !lecturer.is_active;
     await logAdminAction(
       req.user,
       willBeActive ? 'activate_lecturer' : 'deactivate_lecturer',
       'lecturer',
       Number(req.params.id),
-      lecturer ? `${lecturer.first_name} ${lecturer.last_name}` : null
+      `${lecturer.first_name} ${lecturer.last_name}`
     );
-    res.json({ message: 'Lecturer status updated.' });
+    res.json({
+      message: `Lecturer ${willBeActive ? 'reactivated' : 'deactivated'}.`,
+      isActive: willBeActive ? 1 : 0,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Could not update lecturer status.' });
@@ -296,16 +305,23 @@ router.get('/students/export', async (req, res) => {
 router.put('/students/:id/toggle-active', async (req, res) => {
   try {
     const [[student]] = [(await pool.query('SELECT first_name, last_name, is_active FROM students WHERE id = ?', [req.params.id]))[0]];
-    await pool.query('UPDATE students SET is_active = NOT is_active WHERE id = ?', [req.params.id]);
-    const willBeActive = student ? !student.is_active : null;
+    if (!student) return res.status(404).json({ message: 'Student not found.' });
+
+    // See the lecturer route above: SMALLINT 0/1, so `NOT` is a type error in
+    // Postgres even though MySQL allowed it on a TINYINT.
+    await pool.query('UPDATE students SET is_active = 1 - is_active WHERE id = ?', [req.params.id]);
+    const willBeActive = !student.is_active;
     await logAdminAction(
       req.user,
       willBeActive ? 'activate_student' : 'deactivate_student',
       'student',
       Number(req.params.id),
-      student ? `${student.first_name} ${student.last_name}` : null
+      `${student.first_name} ${student.last_name}`
     );
-    res.json({ message: 'Student status updated.' });
+    res.json({
+      message: `Student ${willBeActive ? 'reactivated' : 'deactivated'}.`,
+      isActive: willBeActive ? 1 : 0,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Could not update student status.' });
