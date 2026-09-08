@@ -3,7 +3,10 @@ const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { notify } = require('../utils/notify');
-const { purgeIfFullyHidden, canRemoveFromHistory, removalBlockedMessage } = require('../utils/bookingVisibility');
+const {
+  purgeIfFullyHidden, canRemoveFromHistory, removalBlockedMessage,
+  clearFinishedFromHistory, clearHistoryMessage,
+} = require('../utils/bookingVisibility');
 const { expirePastSlots, releaseSlotStatus, hasSlotPassed } = require('../utils/expireSlots');
 const { notifyWaitlist } = require('../utils/waitlist');
 const { formatSlotTime } = require('../utils/time');
@@ -274,7 +277,20 @@ router.get('/bookings', async (req, res) => {
   }
 });
 
-/* Bookings: remove from lecturer's own history (any status) */
+/* Bookings: clear every finished one out of the lecturer's history at once.
+   Live bookings are left alone and reported back. Declared before
+   /bookings/:id so the collection stays an unambiguous target. */
+router.delete('/bookings', async (req, res) => {
+  try {
+    const result = await clearFinishedFromHistory('lecturer', req.user.id);
+    res.json({ message: clearHistoryMessage(result), ...result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Could not clear your booking history.' });
+  }
+});
+
+/* Bookings: remove one finished booking from the lecturer's own history */
 router.delete('/bookings/:id', async (req, res) => {
   try {
     const [[booking]] = [

@@ -3,7 +3,10 @@ const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { notify } = require('../utils/notify');
-const { purgeIfFullyHidden, canRemoveFromHistory, removalBlockedMessage } = require('../utils/bookingVisibility');
+const {
+  purgeIfFullyHidden, canRemoveFromHistory, removalBlockedMessage,
+  clearFinishedFromHistory, clearHistoryMessage,
+} = require('../utils/bookingVisibility');
 const { expirePastSlots, hasSlotPassed, hasSlotStarted, releaseSlotStatus } = require('../utils/expireSlots');
 const { notifyWaitlist } = require('../utils/waitlist');
 const {
@@ -321,6 +324,20 @@ router.get('/bookings', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Could not load bookings.' });
+  }
+});
+
+/* Clear every finished booking out of the student's history at once. Live
+   bookings are left alone and reported back, rather than the whole request
+   being refused because of them. Declared before /bookings/:id so the
+   collection stays an unambiguous target. */
+router.delete('/bookings', async (req, res) => {
+  try {
+    const result = await clearFinishedFromHistory('student', req.user.id);
+    res.json({ message: clearHistoryMessage(result), ...result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Could not clear your booking history.' });
   }
 });
 

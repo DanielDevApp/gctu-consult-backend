@@ -46,4 +46,76 @@ function removalBlockedMessage(status, viewer) {
     : 'This consultation is still active. Cancel it if you can no longer attend — a live booking can\'t be removed from your history until it has finished.';
 }
 
-module.exports = { purgeIfFullyHidden, REMOVABLE_STATUSES, canRemoveFromHistory, removalBlockedMessage };
+/** The bulk counterpart of purgeIfFullyHidden — one sweep instead of a
+ *  round trip per booking, for the "clear my whole history" path. */
+async function purgeAllFullyHidden() {
+  await pool.query(
+    `DELETE FROM bookings WHERE hidden_by_student = 1 AND hidden_by_lecturer = 1 AND hidden_by_admin = 1`
+  );
+}
+
+const HIDE_COLUMN = {
+  student: 'hidden_by_student',
+  lecturer: 'hidden_by_lecturer',
+  admin: 'hidden_by_admin',
+};
+
+/**
+ * Clears every finished booking out of one viewer's history in a single go,
+ * so a long-running account doesn't have to delete them one at a time.
+ *
+ * Deliberately leaves live bookings in place rather than refusing the whole
+ * request because of them: "clear all" means "clear everything that's done",
+ * and a pending or confirmed consultation is still going to happen. The
+ * returned counts let the caller say so plainly instead of the user noticing
+ * some rows survived and assuming it half-failed.
+ *
+ * Admin isn't a party to any booking, so it clears across all of them; the
+ * student and lecturer views are scoped to their own.
+ */
+async function clearFinishedFromHistory(viewer, userId) {
+  const column = HIDE_COLUMN[viewer];
+  if (!column) throw new Error(`Unknown viewer: ${viewer}`);
+
+  const ownerClause = viewer === 'admin' ? '' : ` AND ${viewer}_id = ?`;
+  const params = viewer === 'admin' ? [] : [userId];
+  const statuses = REMOVABLE_STATUSES.map((s) => `'${s}'`).join(', ');
+
+  const [result] = await pool.query(
+    `UPDATE bookings SET ${column} = 1
+     WHERE ${column} = 0${ownerClause} AND status IN (${statuses})`,
+    params
+  );
+  const [[{ kept }]] = [
+    (await pool.query(
+      `SELECT COUNT(*) AS kept FROM bookings WHERE ${column} = 0${ownerClause}`,
+      params
+    ))[0],
+  ];
+
+  await purgeAllFullyHidden();
+  return { cleared: result.affectedRows, kept };
+}
+
+/** Wording for the result of a bulk clear, including why anything survived. */
+function clearHistoryMessage({ cleared, kept }) {
+  if (cleared === 0) {
+    return kept > 0
+      ? `Nothing to clear — all ${kept} of your bookings are still active. They can be cleared once they've finished.`
+      : 'Your booking history is already empty.';
+  }
+  const base = `Cleared ${cleared} finished booking${cleared === 1 ? '' : 's'} from your history.`;
+  return kept > 0
+    ? `${base} ${kept} active booking${kept === 1 ? '' : 's'} kept — those can be cleared once they've finished.`
+    : base;
+}
+
+module.exports = {
+  purgeIfFullyHidden,
+  purgeAllFullyHidden,
+  clearFinishedFromHistory,
+  clearHistoryMessage,
+  REMOVABLE_STATUSES,
+  canRemoveFromHistory,
+  removalBlockedMessage,
+};

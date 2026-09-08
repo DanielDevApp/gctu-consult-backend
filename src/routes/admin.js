@@ -4,7 +4,9 @@ const { body, validationResult } = require('express-validator');
 const { pool } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { notify } = require('../utils/notify');
-const { purgeIfFullyHidden, canRemoveFromHistory } = require('../utils/bookingVisibility');
+const {
+  purgeIfFullyHidden, canRemoveFromHistory, clearFinishedFromHistory,
+} = require('../utils/bookingVisibility');
 const { logAdminAction } = require('../utils/auditLog');
 const { toCsv, sendCsv } = require('../utils/csv');
 
@@ -457,6 +459,29 @@ router.get('/bookings/export', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Could not export bookings.' });
+  }
+});
+
+/* Clear every finished booking out of the admin's view at once. Live ones are
+   left in place and reported back, so an in-flight consultation can't drop out
+   of the view that exists for oversight. Declared before /bookings/:id so the
+   collection stays an unambiguous target. */
+router.delete('/bookings', async (req, res) => {
+  try {
+    const { cleared, kept } = await clearFinishedFromHistory('admin', req.user.id);
+    await logAdminAction(req.user, 'clear_bookings_from_view', 'booking', null, `${cleared} cleared`);
+    res.json({
+      cleared,
+      kept,
+      message: cleared
+        ? `Cleared ${cleared} finished booking${cleared === 1 ? '' : 's'} from the list.${kept ? ` ${kept} active booking${kept === 1 ? '' : 's'} kept.` : ''}`
+        : (kept
+            ? `Nothing to clear — all ${kept} remaining booking${kept === 1 ? ' is' : 's are'} still active.`
+            : 'The bookings list is already empty.'),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Could not clear the bookings list.' });
   }
 });
 
