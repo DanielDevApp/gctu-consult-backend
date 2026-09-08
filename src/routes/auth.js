@@ -10,6 +10,7 @@ const { sendMail } = require('../utils/mailer');
 const { buildResetEmail } = require('../utils/passwordResetEmail');
 const { buildVerificationEmail } = require('../utils/verificationEmail');
 const { PROGRAMMES, DEPARTMENTS } = require('../utils/academic');
+const { primaryClientUrl } = require('../config/clientUrls');
 
 const router = express.Router();
 
@@ -457,8 +458,9 @@ router.post(
         [user.id, role, tokenHash, expiresAt]
       );
 
-      const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
-      const resetLink = `${clientUrl}/reset-password?token=${token}&role=${role}`;
+      // primaryClientUrl, not CLIENT_URL directly — that env var may hold a
+      // list of allowed origins, which would paste straight into the link.
+      const resetLink = `${primaryClientUrl}/reset-password?token=${token}&role=${role}`;
       const { subject, text, html } = buildResetEmail({
         firstName: user.first_name || user.name || 'there',
         resetLink,

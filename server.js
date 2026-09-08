@@ -15,6 +15,7 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 
 const { testConnection, ensureSchema } = require('./src/config/db');
+const { allowedOrigins, isAllowedOrigin } = require('./src/config/clientUrls');
 const { expirePastSlots } = require('./src/utils/expireSlots');
 const { sendUpcomingReminders } = require('./src/utils/reminders');
 const authRoutes = require('./src/routes/auth');
@@ -35,7 +36,14 @@ app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false 
 
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    // CLIENT_URL may list several origins (see config/clientUrls.js) so the
+    // old and new frontend domains can both work during a domain change.
+    origin(origin, callback) {
+      // No Origin header at all: same-origin requests, curl, and Render's
+      // own health checks. Nothing to enforce, so let them through.
+      if (!origin) return callback(null, true);
+      callback(null, isAllowedOrigin(origin));
+    },
     credentials: true,
     exposedHeaders: ['Content-Disposition'], // lets the frontend read the real filename off CSV export downloads
   })
@@ -77,6 +85,11 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
   console.log(`🚀 GCTU Consult API running on http://localhost:${PORT}`);
+  // Printed on every boot because a CORS mismatch is invisible from the
+  // outside — the frontend just fails every request with no server-side
+  // error to find. Seeing the exact allowed list here turns "the site is
+  // broken" into a one-glance diagnosis.
+  console.log(`🌐 Allowed frontend origin(s): ${allowedOrigins.join(', ')}`);
   await testConnection();
   await ensureSchema();
 

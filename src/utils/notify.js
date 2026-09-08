@@ -1,6 +1,7 @@
 const { pool } = require('../config/db');
 const { sendMail } = require('./mailer');
 const { buildNotificationEmail } = require('./notificationEmail');
+const { primaryClientUrl } = require('../config/clientUrls');
 
 const DASHBOARD_PATH = { student: '/student/dashboard', lecturer: '/lecturer/dashboard', admin: '/admin/dashboard' };
 
@@ -40,12 +41,13 @@ async function emailNotification(recipientId, recipientRole, title, message) {
   ];
   if (!user || !user.email) return;
 
-  const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
   const { subject, text, html } = buildNotificationEmail({
     firstName: user.first_name || 'there',
     title,
     message,
-    dashboardLink: `${clientUrl}${DASHBOARD_PATH[recipientRole] || ''}`,
+    // primaryClientUrl, not CLIENT_URL directly — that env var may hold a
+    // list of allowed origins, which would paste straight into the link.
+    dashboardLink: `${primaryClientUrl}${DASHBOARD_PATH[recipientRole] || ''}`,
   });
   await sendMail({ to: user.email, subject, text, html });
 }
