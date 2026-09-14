@@ -120,7 +120,10 @@ router.post(
   [
     body('firstName').trim().notEmpty().withMessage('First name is required'),
     body('lastName').trim().notEmpty().withMessage('Last name is required'),
-    body('studentId').trim().notEmpty().withMessage('Student ID is required'),
+    // Index numbers are digits only, up to 10. Enforced here as well as on the
+    // register form: the form's input filtering is a convenience that a direct
+    // API call walks straight past.
+    body('studentId').trim().matches(/^\d{1,10}$/).withMessage('Student ID must be numbers only, up to 10 digits'),
     body('level').trim().notEmpty().withMessage('Level is required'),
     body('programme').isIn(PROGRAMMES).withMessage('Please select a valid programme'),
     body('email').isEmail().withMessage('A valid GCTU email is required').normalizeEmail(),
