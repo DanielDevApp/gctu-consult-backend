@@ -14,26 +14,35 @@ const { expirePastSlots } = require('./src/utils/expireSlots');
 const { sendUpcomingReminders } = require('./src/utils/reminders');
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, async () => {
-  console.log(`🚀 GCTU Consult API running on http://localhost:${PORT}`);
-  // Printed on every boot because a CORS mismatch is invisible from the
-  // outside — the frontend just fails every request with no server-side
-  // error to find. Seeing the exact allowed list here turns "the site is
-  // broken" into a one-glance diagnosis.
-  console.log(`🌐 Allowed frontend origin(s): ${allowedOrigins.join(', ')}`);
 
+(async () => {
+  // The database and schema come up *before* the port opens. Listening first
+  // let requests in while columns were still being added, so anything reading
+  // a brand-new column — the auth middleware reads must_change_password on
+  // every request — failed for the first few seconds after each deploy.
+  // Render only sends traffic to a new instance once its port answers, so
+  // waiting here is what makes that switchover clean.
   await testConnection();
   await ensureSchema();
 
-  // Catch-all sweep: the routes that actually list availability also expire
-  // past slots inline (so there's no lag on the pages that matter), but this
-  // periodic sweep keeps everything else (dashboard counts, etc.) fresh too.
-  await expirePastSlots();
-  setInterval(expirePastSlots, 60 * 1000);
+  app.listen(PORT, async () => {
+    console.log(`🚀 GCTU Consult API running on http://localhost:${PORT}`);
+    // Printed on every boot because a CORS mismatch is invisible from the
+    // outside — the frontend just fails every request with no server-side
+    // error to find. Seeing the exact allowed list here turns "the site is
+    // broken" into a one-glance diagnosis.
+    console.log(`🌐 Allowed frontend origin(s): ${allowedOrigins.join(', ')}`);
 
-  // "Your consultation is coming up" reminders — purely proactive, so it
-  // doesn't need the inline-on-every-request treatment expiry gets. A
-  // 5-minute cadence is plenty against a default 60-minute reminder window.
-  await sendUpcomingReminders();
-  setInterval(sendUpcomingReminders, 5 * 60 * 1000);
-});
+    // Catch-all sweep: the routes that actually list availability also expire
+    // past slots inline (so there's no lag on the pages that matter), but this
+    // periodic sweep keeps everything else (dashboard counts, etc.) fresh too.
+    await expirePastSlots();
+    setInterval(expirePastSlots, 60 * 1000);
+
+    // "Your consultation is coming up" reminders — purely proactive, so it
+    // doesn't need the inline-on-every-request treatment expiry gets. A
+    // 5-minute cadence is plenty against a default 60-minute reminder window.
+    await sendUpcomingReminders();
+    setInterval(sendUpcomingReminders, 5 * 60 * 1000);
+  });
+})();
