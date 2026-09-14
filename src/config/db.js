@@ -467,17 +467,44 @@ const SCHEMA_LOCK_KEY = 947213;
  * happens whenever instances overlap, which is exactly what a rolling deploy
  * does. Anyone who can't get the lock waits, then finds the work already done.
  */
-async function ensureSchema() {
+async function ensureSchema({ lockTimeoutMs = 60000, lockRetryMs = 1000 } = {}) {
   const lock = await pool.getConnection();
   try {
-    await lock.query('SELECT pg_advisory_lock(?)', [SCHEMA_LOCK_KEY]);
+    const locked = await acquireSchemaLock(lock, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
+    if (!locked) {
+      console.warn(
+        `⚠️  Schema lock still held after ${Math.round(lockTimeoutMs / 1000)}s — applying the schema without it ` +
+        'rather than leaving the server unable to start.'
+      );
+    }
     try {
       return await applySchema();
     } finally {
-      await lock.query('SELECT pg_advisory_unlock(?)', [SCHEMA_LOCK_KEY]);
+      if (locked) await lock.query('SELECT pg_advisory_unlock(?)', [SCHEMA_LOCK_KEY]);
     }
   } finally {
     lock.release();
+  }
+}
+
+/**
+ * Waits for the schema lock — but never forever.
+ *
+ * Boot waits for the schema before the port opens (see server.js), so a lock
+ * that never frees would mean an instance that never comes up: a full outage
+ * on deploy. That can genuinely happen behind a transaction-pooling connection
+ * pooler, where a lock and its unlock can land on different server connections
+ * and leave the lock held. So this polls with pg_try_advisory_lock and gives up
+ * after the timeout. The DDL is idempotent; the lock only guards the rare
+ * two-instances-at-once trigger race, and risking that beats not booting.
+ */
+async function acquireSchemaLock(conn, { timeoutMs, retryMs }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [[row]] = [(await conn.query('SELECT pg_try_advisory_lock(?) AS locked', [SCHEMA_LOCK_KEY]))[0]];
+    if (row.locked) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
   }
 }
 
