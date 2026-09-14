@@ -16,6 +16,7 @@ const lecturerRoutes = require('./routes/lecturer');
 const studentRoutes = require('./routes/student');
 const adminRoutes = require('./routes/admin');
 const notificationRoutes = require('./routes/notifications');
+const pushRoutes = require('./routes/push');
 
 /**
  * The configured Express app, with no side effects beyond wiring middleware
@@ -112,6 +113,7 @@ app.use('/api/lecturer', lecturerRoutes);
 app.use('/api/student', studentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/push', pushRoutes);
 
 app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));
 

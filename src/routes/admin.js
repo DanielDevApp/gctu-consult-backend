@@ -7,6 +7,7 @@ const { notify } = require('../utils/notify');
 const {
   purgeIfFullyHidden, canRemoveFromHistory, clearFinishedFromHistory,
 } = require('../utils/bookingVisibility');
+const { removeSubscriptionsForUser } = require('../utils/push');
 const { logAdminAction } = require('../utils/auditLog');
 const { toCsv, sendCsv } = require('../utils/csv');
 
@@ -247,6 +248,10 @@ router.delete('/lecturers/:id', async (req, res) => {
     }
 
     await pool.query('DELETE FROM lecturers WHERE id = ?', [req.params.id]);
+    // Push subscriptions have no foreign key back to the account (one table
+    // serves all three roles), so they don't cascade — clear them explicitly,
+    // or the deleted user's devices linger as orphan rows.
+    await removeSubscriptionsForUser(req.params.id, 'lecturer');
     await logAdminAction(req.user, 'delete_lecturer', 'lecturer', Number(req.params.id), `${lecturer.first_name} ${lecturer.last_name}`);
     res.json({ message: 'Lecturer removed.' });
   } catch (err) {
@@ -364,6 +369,7 @@ router.delete('/students/:id', async (req, res) => {
     }
 
     await pool.query('DELETE FROM students WHERE id = ?', [req.params.id]);
+    await removeSubscriptionsForUser(req.params.id, 'student');
     await logAdminAction(req.user, 'delete_student', 'student', Number(req.params.id), `${student.first_name} ${student.last_name}`);
     res.json({ message: 'Student removed.' });
   } catch (err) {
@@ -600,6 +606,7 @@ router.delete('/admins/:id', async (req, res) => {
       return res.status(403).json({ message: 'The super admin account cannot be deleted.' });
     }
     await pool.query('DELETE FROM admins WHERE id = ?', [req.params.id]);
+    await removeSubscriptionsForUser(req.params.id, 'admin');
     await logAdminAction(req.user, 'delete_admin', 'admin', Number(req.params.id), target ? `${target.name} <${target.email}>` : null);
     res.json({ message: 'Admin removed.' });
   } catch (err) {

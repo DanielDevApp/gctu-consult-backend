@@ -210,6 +210,23 @@ CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient_id, re
 CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(is_read);
 
 -- ---------------------------------------------------------------------
+-- PUSH SUBSCRIPTIONS (Web Push — one row per browser/device that turned
+-- push notifications on; no FK because it serves all three roles)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL,
+  user_role VARCHAR(20) NOT NULL CHECK (user_role IN ('student', 'lecturer', 'admin')),
+  endpoint TEXT NOT NULL UNIQUE,         -- the push service URL; one per browser per site
+  p256dh VARCHAR(255) NOT NULL,          -- browser's public key, used to encrypt the payload
+  auth VARCHAR(255) NOT NULL,            -- browser's auth secret
+  user_agent VARCHAR(255) DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id, user_role);
+
+-- ---------------------------------------------------------------------
 -- EMAIL VERIFICATIONS (self-registration confirms the address via a
 -- 6-digit OTP emailed to the user, student/lecturer only)
 -- ---------------------------------------------------------------------

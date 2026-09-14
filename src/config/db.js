@@ -356,6 +356,28 @@ async function applySchema() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient_id, recipient_role)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(is_read)`);
 
+    // One row per browser/device that has turned push notifications on. No
+    // foreign key: the table serves students, lecturers and admins alike, so
+    // ownership is the (user_id, user_role) pair and deleting an account clears
+    // its rows explicitly. The endpoint is unique because a browser holds one
+    // subscription per site — another account signing in there takes it over.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL,
+        user_role VARCHAR(20) NOT NULL,
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh VARCHAR(255) NOT NULL,
+        auth VARCHAR(255) NOT NULL,
+        user_agent VARCHAR(255) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE push_subscriptions DROP CONSTRAINT IF EXISTS push_subscriptions_user_role_check`);
+    await pool.query(`ALTER TABLE push_subscriptions ADD CONSTRAINT push_subscriptions_user_role_check CHECK (user_role IN ('student', 'lecturer', 'admin'))`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id, user_role)`);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_verifications (
         id SERIAL PRIMARY KEY,

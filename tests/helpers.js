@@ -30,6 +30,15 @@ function assertLocalDatabase() {
 }
 assertLocalDatabase();
 
+// Push delivery is captured rather than sent under test (see utils/push.js),
+// but the routes still require keys to exist. Generate a throwaway pair when
+// the environment has none, so the suite never depends on real keys.
+if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+  const { publicKey, privateKey } = require('web-push').generateVAPIDKeys();
+  process.env.VAPID_PUBLIC_KEY = publicKey;
+  process.env.VAPID_PRIVATE_KEY = privateKey;
+}
+
 const { PROGRAMMES, DEPARTMENTS } = require('../src/utils/academic');
 const app = require('../src/app');
 
@@ -58,6 +67,10 @@ async function start() {
 
 /** Removes every row this run created, then closes the server. */
 async function stop() {
+  // No foreign key to cascade from, so a created account's devices go first.
+  for (const [role, ids] of [['student', created.students], ['lecturer', created.lecturers], ['admin', created.admins]]) {
+    for (const id of ids) await pool.query('DELETE FROM push_subscriptions WHERE user_id = ? AND user_role = ?', [id, role]);
+  }
   for (const id of created.students) await pool.query('DELETE FROM students WHERE id = ?', [id]);
   for (const id of created.lecturers) await pool.query('DELETE FROM lecturers WHERE id = ?', [id]);
   for (const id of created.admins) await pool.query('DELETE FROM admins WHERE id = ?', [id]);
