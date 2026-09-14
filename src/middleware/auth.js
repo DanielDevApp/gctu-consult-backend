@@ -4,6 +4,17 @@ const { pool } = require('../config/db');
 const ACCOUNT_TABLE = { student: 'students', lecturer: 'lecturers', admin: 'admins' };
 
 /**
+ * The only requests an account still on an admin-issued temporary password
+ * may make: reading who it is, choosing a new password, and (on logout)
+ * detaching its device from push notifications.
+ */
+const PASSWORD_CHANGE_ROUTES = new Set([
+  'GET /api/auth/me',
+  'PUT /api/profile/password',
+  'DELETE /api/push/subscribe',
+]);
+
+/**
  * Authenticates a request, then confirms the account behind the token is
  * still usable.
  *
@@ -40,7 +51,7 @@ async function requireAuth(req, res, next) {
   try {
     // Admins have neither is_active nor email_verified, so only students and
     // lecturers get those columns selected.
-    const columns = decoded.role === 'admin' ? 'id' : 'id, is_active, email_verified';
+    const columns = decoded.role === 'admin' ? 'id' : 'id, is_active, email_verified, must_change_password';
     const [[account]] = [
       (await pool.query(`SELECT ${columns} FROM ${table} WHERE id = ?`, [decoded.id]))[0],
     ];
@@ -60,6 +71,18 @@ async function requireAuth(req, res, next) {
         return res.status(403).json({
           message: 'Please verify your email address before continuing.',
           code: 'EMAIL_NOT_VERIFIED',
+        });
+      }
+      // Enforced here rather than only in the UI: otherwise "must change your
+      // password" is a suggestion, and a temporary password an admin passed on
+      // over WhatsApp would work against the whole API indefinitely. It also
+      // confines any session that was already signed in when an admin issued
+      // a new password.
+      const route = `${req.method} ${req.originalUrl.split('?')[0]}`;
+      if (account.must_change_password === 1 && !PASSWORD_CHANGE_ROUTES.has(route)) {
+        return res.status(403).json({
+          message: 'Please choose a new password before continuing.',
+          code: 'PASSWORD_CHANGE_REQUIRED',
         });
       }
     }

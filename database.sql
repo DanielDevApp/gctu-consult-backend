@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS students (
   avatar_color VARCHAR(20) DEFAULT NULL,
   avatar_url VARCHAR(255) DEFAULT NULL,
   email_verified SMALLINT NOT NULL DEFAULT 0,  -- set on self-registration; flips to 1 once the emailed code is verified
+  must_change_password SMALLINT NOT NULL DEFAULT 0, -- 1 = admin-issued temporary password; must choose their own at next sign-in
   is_active SMALLINT NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -63,6 +64,7 @@ CREATE TABLE IF NOT EXISTS lecturers (
   avatar_url VARCHAR(255) DEFAULT NULL,
   email_verified SMALLINT NOT NULL DEFAULT 0,
   is_verified SMALLINT NOT NULL DEFAULT 0,   -- admin must verify before they are publicly listed
+  must_change_password SMALLINT NOT NULL DEFAULT 0, -- 1 = admin-issued temporary password; must choose their own at next sign-in
   is_active SMALLINT NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

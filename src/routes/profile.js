@@ -91,10 +91,21 @@ router.put(
       if (!user) return res.status(404).json({ message: 'User not found.' });
 
       const match = await bcrypt.compare(currentPassword, user.password_hash);
-      if (!match) return res.status(401).json({ message: 'Current password is incorrect.' });
+      // 400, not 401. The frontend treats any 401 as "your session has ended"
+      // and signs the user out — so a single mistyped current password used
+      // to kick someone out of the app mid-change.
+      if (!match) return res.status(400).json({ message: 'Current password is incorrect.' });
+      // Re-using the current password would make a forced change pointless:
+      // the temporary password an admin handed out would simply stay live.
+      if (currentPassword === newPassword) {
+        return res.status(400).json({ message: 'Choose a new password that is different from your current one.' });
+      }
 
       const newHash = await bcrypt.hash(newPassword, 10);
-      await pool.query(`UPDATE ${table} SET password_hash = ? WHERE id = ?`, [newHash, id]);
+      // Only students and lecturers are ever issued temporary passwords, so
+      // only their tables carry the flag this clears.
+      const clearFlag = role === 'admin' ? '' : ', must_change_password = 0';
+      await pool.query(`UPDATE ${table} SET password_hash = ?${clearFlag} WHERE id = ?`, [newHash, id]);
       return res.json({ message: 'Password changed successfully.' });
     } catch (err) {
       console.error(err);

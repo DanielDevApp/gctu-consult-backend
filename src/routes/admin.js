@@ -8,6 +8,9 @@ const {
   purgeIfFullyHidden, canRemoveFromHistory, clearFinishedFromHistory,
 } = require('../utils/bookingVisibility');
 const { removeSubscriptionsForUser } = require('../utils/push');
+const {
+  studentFields, lecturerFields, passwordField, randomAvatarColor, findAccountConflict,
+} = require('../utils/accounts');
 const { logAdminAction } = require('../utils/auditLog');
 const { toCsv, sendCsv } = require('../utils/csv');
 
@@ -31,6 +34,59 @@ function readPagination(req, { defaultPageSize = 20, maxPageSize = 100 } = {}) {
 }
 
 const todayStamp = () => new Date().toISOString().slice(0, 10);
+
+// Temporary by default: a password an admin has seen, typed and passed on over
+// WhatsApp or on a note shouldn't stay live. Opting out takes an explicit false.
+const requirePasswordChangeField = body('requirePasswordChange').optional().isBoolean()
+  .withMessage('requirePasswordChange must be true or false').toBoolean(true);
+const mustChangeFrom = (req) => (req.body.requirePasswordChange === false ? 0 : 1);
+
+/**
+ * Lets an admin issue a new password for an existing student or lecturer —
+ * for someone who lost their temporary password before first sign-in, or is
+ * locked out and can't reach their email for a self-service reset.
+ *
+ * With the forced change left on (the default), any session already signed in
+ * to that account is confined to choosing a new password, which needs *this*
+ * password rather than the old one, so an old session can't simply carry on.
+ * The owner is always notified: an administrator changing someone's password
+ * is exactly the kind of thing that must never happen silently.
+ */
+function setPasswordHandlers(role) {
+  const table = role === 'student' ? 'students' : 'lecturers';
+  const label = role === 'student' ? 'Student' : 'Lecturer';
+  return [
+    [passwordField(), requirePasswordChangeField],
+    async (req, res) => {
+      if (handleValidation(req, res)) return;
+      const mustChange = mustChangeFrom(req);
+      try {
+        const [[user]] = [(await pool.query(`SELECT id, first_name, last_name FROM ${table} WHERE id = ?`, [req.params.id]))[0]];
+        if (!user) return res.status(404).json({ message: `${label} not found.` });
+
+        const passwordHash = await bcrypt.hash(req.body.password, 10);
+        await pool.query(
+          `UPDATE ${table} SET password_hash = ?, must_change_password = ? WHERE id = ?`,
+          [passwordHash, mustChange, user.id]
+        );
+        await logAdminAction(req.user, `set_${role}_password`, role, user.id, `${user.first_name} ${user.last_name}`);
+        await notify(
+          user.id,
+          role,
+          'Password changed by an administrator',
+          mustChange
+            ? "An administrator set a new password for your account. You'll be asked to choose your own the next time you sign in. If you didn't expect this, contact the admin office."
+            : "An administrator set a new password for your account. If you didn't expect this, contact the admin office.",
+          'account_security'
+        );
+        res.json({ message: `New password set for ${user.first_name} ${user.last_name}.`, mustChangePassword: mustChange === 1 });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Could not set the password.' });
+      }
+    },
+  ];
+}
 
 /* ------------------------------------------------------------------ */
 /* Overview stats                                                      */
@@ -132,7 +188,7 @@ router.get('/lecturers', async (req, res) => {
 
     const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM lecturers ${where}`, params);
     const [rows] = await pool.query(
-      `SELECT id, first_name, last_name, staff_id, department, title, email, is_verified, is_active, created_at
+      `SELECT id, first_name, last_name, staff_id, department, title, email, is_verified, is_active, must_change_password, created_at
        FROM lecturers ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       [...params, pageSize, offset]
     );
@@ -167,6 +223,42 @@ router.get('/lecturers/export', async (req, res) => {
     res.status(500).json({ message: 'Could not export lecturers.' });
   }
 });
+
+/* Create a lecturer account on their behalf. The admin is vouching for the
+   person, so the account skips email verification and is verified for
+   students to find straight away — there's nothing left for anyone to approve. */
+router.post('/lecturers', [...lecturerFields, requirePasswordChangeField], async (req, res) => {
+  if (handleValidation(req, res)) return;
+  const { title, firstName, lastName, staffId, department, email, password } = req.body;
+  const mustChange = mustChangeFrom(req);
+  try {
+    const conflict = await findAccountConflict('lecturer', { email, schoolId: staffId });
+    if (conflict) return res.status(409).json({ message: conflict });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      `INSERT INTO lecturers
+         (first_name, last_name, staff_id, department, title, email, password_hash, avatar_color,
+          email_verified, is_verified, must_change_password)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)`,
+      [firstName, lastName, staffId, department, title || null, email, passwordHash, randomAvatarColor(), mustChange]
+    );
+    await logAdminAction(req.user, 'create_lecturer', 'lecturer', result.insertId, `${firstName} ${lastName} (${staffId})`);
+    res.status(201).json({
+      message: 'Lecturer account created.',
+      id: result.insertId,
+      login: { role: 'lecturer', identifier: staffId, email, mustChangePassword: mustChange === 1 },
+    });
+  } catch (err) {
+    // Two admins adding the same person at the same moment can both pass the
+    // conflict check above; the unique constraint is the backstop.
+    if (err.code === '23505') return res.status(409).json({ message: 'An account with this email or staff ID already exists.' });
+    console.error(err);
+    res.status(500).json({ message: 'Could not create the lecturer account.' });
+  }
+});
+
+router.put('/lecturers/:id/password', ...setPasswordHandlers('lecturer'));
 
 router.put('/lecturers/:id/verify', async (req, res) => {
   try {
@@ -272,7 +364,7 @@ router.get('/students', async (req, res) => {
 
     const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM students ${where}`, params);
     const [rows] = await pool.query(
-      `SELECT id, first_name, last_name, student_id, level, programme, email, is_active, created_at
+      `SELECT id, first_name, last_name, student_id, level, programme, email, is_active, must_change_password, created_at
        FROM students ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       [...params, pageSize, offset]
     );
@@ -306,6 +398,40 @@ router.get('/students/export', async (req, res) => {
     res.status(500).json({ message: 'Could not export students.' });
   }
 });
+
+/* Create a student account on their behalf. The admin is vouching for the
+   address, so there's no email-verification step — the student can sign in
+   straight away with the details the admin hands them. */
+router.post('/students', [...studentFields, requirePasswordChangeField], async (req, res) => {
+  if (handleValidation(req, res)) return;
+  const { firstName, lastName, studentId, level, programme, email, password } = req.body;
+  const mustChange = mustChangeFrom(req);
+  try {
+    const conflict = await findAccountConflict('student', { email, schoolId: studentId });
+    if (conflict) return res.status(409).json({ message: conflict });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      `INSERT INTO students
+         (first_name, last_name, student_id, level, programme, email, password_hash, avatar_color,
+          email_verified, must_change_password)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      [firstName, lastName, studentId, level, programme, email, passwordHash, randomAvatarColor(), mustChange]
+    );
+    await logAdminAction(req.user, 'create_student', 'student', result.insertId, `${firstName} ${lastName} (${studentId})`);
+    res.status(201).json({
+      message: 'Student account created.',
+      id: result.insertId,
+      login: { role: 'student', identifier: studentId, email, mustChangePassword: mustChange === 1 },
+    });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ message: 'An account with this email or student ID already exists.' });
+    console.error(err);
+    res.status(500).json({ message: 'Could not create the student account.' });
+  }
+});
+
+router.put('/students/:id/password', ...setPasswordHandlers('student'));
 
 router.put('/students/:id/toggle-active', async (req, res) => {
   try {

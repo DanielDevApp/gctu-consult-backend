@@ -208,6 +208,12 @@ async function applySchema() {
     await pool.query(`DROP TRIGGER IF EXISTS trg_lecturers_updated_at ON lecturers`);
     await pool.query(`CREATE TRIGGER trg_lecturers_updated_at BEFORE UPDATE ON lecturers FOR EACH ROW EXECUTE FUNCTION set_updated_at()`);
 
+    // Set when an administrator creates an account, or issues a new password,
+    // with a temporary password: the user must choose their own before doing
+    // anything else. Enforced in middleware/auth.js.
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS must_change_password SMALLINT NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE lecturers ADD COLUMN IF NOT EXISTS must_change_password SMALLINT NOT NULL DEFAULT 0`);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS lecturer_courses (
         id SERIAL PRIMARY KEY,

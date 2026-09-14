@@ -9,7 +9,7 @@ const { requireAuth } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const { buildResetEmail } = require('../utils/passwordResetEmail');
 const { buildVerificationEmail } = require('../utils/verificationEmail');
-const { PROGRAMMES, DEPARTMENTS } = require('../utils/academic');
+const { studentFields, lecturerFields, randomAvatarColor } = require('../utils/accounts');
 const { primaryClientUrl } = require('../config/clientUrls');
 const { loginKey, bodyScopedKey } = require('../middleware/rateLimitKeys');
 
@@ -73,8 +73,6 @@ const loginLimiter = rateLimit({
   message: { message: 'Too many failed login attempts for this account. Please wait a few minutes and try again.' },
 });
 
-const AVATAR_COLORS = ['#0F3D5F', '#1D6F5C', '#B8860B', '#7A2E4A', '#2E5C8A', '#8A4B2E'];
-const randomColor = () => AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
 
 function handleValidation(req, res) {
   const errors = validationResult(req);
@@ -117,18 +115,7 @@ async function issueVerificationEmail(user, role) {
 /* ------------------------------------------------------------------ */
 router.post(
   '/register/student',
-  [
-    body('firstName').trim().notEmpty().withMessage('First name is required'),
-    body('lastName').trim().notEmpty().withMessage('Last name is required'),
-    // Index numbers are digits only, up to 10. Enforced here as well as on the
-    // register form: the form's input filtering is a convenience that a direct
-    // API call walks straight past.
-    body('studentId').trim().matches(/^\d{1,10}$/).withMessage('Student ID must be numbers only, up to 10 digits'),
-    body('level').trim().notEmpty().withMessage('Level is required'),
-    body('programme').isIn(PROGRAMMES).withMessage('Please select a valid programme'),
-    body('email').isEmail().withMessage('A valid GCTU email is required').normalizeEmail(),
-    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  ],
+  studentFields,
   async (req, res) => {
     if (handleValidation(req, res)) return;
     const { firstName, lastName, studentId, level, programme, email, password } = req.body;
@@ -146,7 +133,7 @@ router.post(
       const [result] = await pool.query(
         `INSERT INTO students (first_name, last_name, student_id, level, programme, email, password_hash, avatar_color, email_verified)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-        [firstName, lastName, studentId, level, programme, email, passwordHash, randomColor()]
+        [firstName, lastName, studentId, level, programme, email, passwordHash, randomAvatarColor()]
       );
 
       const emailSent = await issueVerificationEmail(
@@ -173,14 +160,7 @@ router.post(
 /* ------------------------------------------------------------------ */
 router.post(
   '/register/lecturer',
-  [
-    body('firstName').trim().notEmpty().withMessage('First name is required'),
-    body('lastName').trim().notEmpty().withMessage('Last name is required'),
-    body('staffId').trim().notEmpty().withMessage('Staff ID is required'),
-    body('department').isIn(DEPARTMENTS).withMessage('Please select a valid department'),
-    body('email').isEmail().withMessage('A valid GCTU email is required').normalizeEmail(),
-    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  ],
+  lecturerFields,
   async (req, res) => {
     if (handleValidation(req, res)) return;
     const { firstName, lastName, staffId, department, title, email, password } = req.body;
@@ -198,7 +178,7 @@ router.post(
       const [result] = await pool.query(
         `INSERT INTO lecturers (first_name, last_name, staff_id, department, title, email, password_hash, avatar_color, email_verified)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-        [firstName, lastName, staffId, department, title || null, email, passwordHash, randomColor()]
+        [firstName, lastName, staffId, department, title || null, email, passwordHash, randomAvatarColor()]
       );
 
       const emailSent = await issueVerificationEmail(
@@ -410,12 +390,12 @@ router.get('/me', requireAuth, async (req, res) => {
     let rows;
     if (role === 'student') {
       [rows] = await pool.query(
-        'SELECT id, first_name, last_name, student_id, level, programme, email, avatar_color, avatar_url, created_at FROM students WHERE id = ?',
+        'SELECT id, first_name, last_name, student_id, level, programme, email, avatar_color, avatar_url, must_change_password, created_at FROM students WHERE id = ?',
         [id]
       );
     } else if (role === 'lecturer') {
       [rows] = await pool.query(
-        'SELECT id, first_name, last_name, staff_id, department, title, office, bio, email, avatar_color, avatar_url, is_verified, created_at FROM lecturers WHERE id = ?',
+        'SELECT id, first_name, last_name, staff_id, department, title, office, bio, email, avatar_color, avatar_url, is_verified, must_change_password, created_at FROM lecturers WHERE id = ?',
         [id]
       );
     } else {
